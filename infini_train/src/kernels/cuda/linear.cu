@@ -1,6 +1,8 @@
 #include "cublas_v2.h"
 #include "glog/logging.h"
 #include <cub/block/block_reduce.cuh>
+#include <algorithm>
+
 
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
@@ -29,8 +31,88 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
     // REF:
     // =================================== 作业 ===================================
 
-    auto output = std::make_shared<Tensor>();
+    //   auto output = std::make_shared<Tensor>();
+    // return output;
+    CHECK(input);
+    CHECK(other);
+    CHECK(input->Dtype()==DataType::kFLOAT32);
+    CHECK(other->Dtype()==DataType::kFLOAT32);
+    CHECK(input->GetDevice().Type()== DeviceType::kCUDA);
+    CHECK(other->GetDevice().Type()== DeviceType::kCUDA);
+
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+    CHECK_EQ(input_dims.back(), other_dims[other_dims.size() - 2]);
+
+    const int64_t m = input_dims[input_dims.size() - 2];
+    const int64_t k = input_dims[input_dims.size() - 1];
+    const int64_t n = other_dims[other_dims.size() - 1];
+
+    int64_t input_batch = 1;
+    for (size_t i = 0; i + 2 < input_dims.size(); ++i) {
+        input_batch *= input_dims[i];
+    }
+    int64_t other_batch = 1;
+    for (size_t i = 0; i + 2 < other_dims.size(); ++i) {
+        other_batch *= other_dims[i];
+    }
+
+    CHECK(input_batch == other_batch || input_batch == 1 || other_batch == 1)
+        << "Batch dimensions must match or be 1 for broadcasting.";
+
+    const int64_t batch_size = std::max(input_batch, other_batch);
+
+    std::vector<int64_t> output_dims;
+    const auto &batch_dims = (input_dims.size() >= other_dims.size()) ? input_dims : other_dims;
+    for (size_t i = 0; i + 2 < batch_dims.size(); ++i) {
+        output_dims.push_back(batch_dims[i]);
+    }
+    output_dims.push_back(m);
+    output_dims.push_back(n);
+
+    auto output = std::make_shared<Tensor>(output_dims, DataType::kFLOAT32, input->GetDevice());
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
+    if (batch_size == 1) {
+        // Row-major trick: compute C^T = B^T * A^T in column-major view
+        CUBLAS_CHECK(cublasSgemm(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k),
+            &alpha,
+            static_cast<const float *>(other->DataPtr()), static_cast<int>(n),
+            static_cast<const float *>(input->DataPtr()), static_cast<int>(k),
+            &beta,
+            static_cast<float *>(output->DataPtr()), static_cast<int>(n)
+        ));
+    } else {
+        const int64_t input_stride = (input_batch == 1) ? 0 : (m * k);
+        const int64_t other_stride = (other_batch == 1) ? 0 : (k * n);
+        const int64_t output_stride = m * n;
+
+        CUBLAS_CHECK(cublasSgemmStridedBatched(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k),
+            &alpha,
+            static_cast<const float *>(other->DataPtr()), static_cast<int>(n), other_stride,
+            static_cast<const float *>(input->DataPtr()), static_cast<int>(k), input_stride,
+            &beta,
+            static_cast<float *>(output->DataPtr()), static_cast<int>(n), output_stride,
+            static_cast<int>(batch_size)
+        ));
+    }
+
+    CUBLAS_CHECK(cublasDestroy(handle));
     return output;
+
 }
 
 std::tuple<std::shared_ptr<Tensor>, std::shared_ptr<Tensor>>
@@ -41,9 +123,126 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
     // REF:
     // =================================== 作业 ===================================
 
-    auto grad_input = std::make_shared<Tensor>();
-    auto grad_other = std::make_shared<Tensor>();
+    // auto grad_input = std::make_shared<Tensor>();
+    // auto grad_other = std::make_shared<Tensor>();
+    // return {grad_input, grad_other};
+    CHECK(input);
+    CHECK(other);
+    CHECK(grad_output);
+    CHECK(input->Dtype()== DataType::kFLOAT32);
+    CHECK(other->Dtype()== DataType::kFLOAT32);
+    CHECK(grad_output->Dtype()== DataType::kFLOAT32);
+    CHECK(input->GetDevice().Type()== DeviceType::kCUDA);
+    CHECK(other->GetDevice().Type()== DeviceType::kCUDA);
+    CHECK(grad_output->GetDevice().Type()== DeviceType::kCUDA);
+
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+    const auto &go_dims = grad_output->Dims();
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+    CHECK_EQ(input_dims.back(), other_dims[other_dims.size() - 2]);
+
+    const int64_t m = input_dims[input_dims.size() - 2];
+    const int64_t k = input_dims[input_dims.size() - 1];
+    const int64_t n = other_dims[other_dims.size() - 1];
+    CHECK_EQ(go_dims[go_dims.size() - 2], m);
+    CHECK_EQ(go_dims[go_dims.size() - 1], n);
+
+    int64_t input_batch = 1;
+    for (size_t i = 0; i + 2 < input_dims.size(); ++i) {
+        input_batch *= input_dims[i];
+    }
+    int64_t other_batch = 1;
+    for (size_t i = 0; i + 2 < other_dims.size(); ++i) {
+        other_batch *= other_dims[i];
+    }
+    CHECK(input_batch == other_batch || input_batch == 1 || other_batch == 1);
+
+    const int64_t batch_size = std::max(input_batch, other_batch);
+
+    auto grad_input = std::make_shared<Tensor>(input_dims, DataType::kFLOAT32, input->GetDevice());
+    auto grad_other = std::make_shared<Tensor>(other_dims, DataType::kFLOAT32, input->GetDevice());
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
+    if (batch_size == 1) {
+        // grad_input^T(K,M) = other(K,N) * grad_output^T(N,M)
+        CUBLAS_CHECK(cublasSgemm(
+            handle,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            static_cast<int>(k), static_cast<int>(m), static_cast<int>(n),
+            &alpha,
+            static_cast<const float *>(other->DataPtr()), static_cast<int>(n),
+            static_cast<const float *>(grad_output->DataPtr()), static_cast<int>(n),
+            &beta,
+            static_cast<float *>(grad_input->DataPtr()), static_cast<int>(k)
+        ));
+
+        // grad_other^T(N,K) = grad_output^T(N,M) * input(M,K)
+        CUBLAS_CHECK(cublasSgemm(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_T,
+            static_cast<int>(n), static_cast<int>(k), static_cast<int>(m),
+            &alpha,
+            static_cast<const float *>(grad_output->DataPtr()), static_cast<int>(n),
+            static_cast<const float *>(input->DataPtr()), static_cast<int>(k),
+            &beta,
+            static_cast<float *>(grad_other->DataPtr()), static_cast<int>(n)
+        ));
+    } else {
+        const int64_t input_stride = (input_batch == 1) ? 0 : (m * k);
+        const int64_t other_stride = (other_batch == 1) ? 0 : (k * n);
+        const int64_t go_stride = m * n;
+
+        // If broadcast, we must accumulate gradients into the single shared tensor.
+        // Easiest is: initialize to 0 and use beta=1 for accumulation when stride==0.
+        if (input_batch == 1) {
+            grad_input->Fill<float>(0.0f);
+        }
+        if (other_batch == 1) {
+            grad_other->Fill<float>(0.0f);
+        }
+
+        const float beta_gi = (input_batch == 1) ? 1.0f : 0.0f;
+        const float beta_go = (other_batch == 1) ? 1.0f : 0.0f;
+
+        // grad_input^T(K,M) = other(K,N) * grad_output^T(N,M)
+        CUBLAS_CHECK(cublasSgemmStridedBatched(
+            handle,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            static_cast<int>(k), static_cast<int>(m), static_cast<int>(n),
+            &alpha,
+            static_cast<const float *>(other->DataPtr()), static_cast<int>(n), other_stride,
+            static_cast<const float *>(grad_output->DataPtr()), static_cast<int>(n), go_stride,
+            &beta_gi,
+            static_cast<float *>(grad_input->DataPtr()), static_cast<int>(k),
+            (input_batch == 1) ? 0 : (m * k),
+            static_cast<int>(batch_size)
+        ));
+
+        // grad_other^T(N,K) = grad_output^T(N,M) * input(M,K)
+        CUBLAS_CHECK(cublasSgemmStridedBatched(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_T,
+            static_cast<int>(n), static_cast<int>(k), static_cast<int>(m),
+            &alpha,
+            static_cast<const float *>(grad_output->DataPtr()), static_cast<int>(n), go_stride,
+            static_cast<const float *>(input->DataPtr()), static_cast<int>(k), input_stride,
+            &beta_go,
+            static_cast<float *>(grad_other->DataPtr()), static_cast<int>(n),
+            (other_batch == 1) ? 0 : (k * n),
+            static_cast<int>(batch_size)
+        ));
+    }
+
+    CUBLAS_CHECK(cublasDestroy(handle));
     return {grad_input, grad_other};
+ 
 }
 
 __global__ void BiasCopyKernel(float *output, const float *bias, int bs, int out_features) {
