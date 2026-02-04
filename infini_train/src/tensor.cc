@@ -283,7 +283,41 @@ std::shared_ptr<Tensor> Tensor::Flatten(int64_t start, int64_t end) {
     // HINT:
     // =================================== 作业 ===================================
 
-    return std::make_shared<Tensor>();
+    if (dims_.empty()) {
+        return Contiguous()->View(dims_);
+    }
+
+    const int64_t ndim = static_cast<int64_t>(dims_.size());
+
+    // 支持负索引：-1 表示最后一维
+    if (start < 0) start += ndim;
+    if (end < 0) end += ndim;
+
+    CHECK_GE(start, 0);
+    CHECK_LT(start, ndim);
+    CHECK_GE(end, 0);
+    CHECK_LT(end, ndim);
+    CHECK_LE(start, end);
+
+    // 合并 [start, end] 的维度大小
+    int64_t merged = 1;
+    for (int64_t i = start; i <= end; ++i) {
+        merged *= dims_[i];
+    }
+
+    // 生成新形状：prefix + merged + suffix
+    std::vector<int64_t> new_shape;
+    new_shape.reserve(dims_.size() - (end - start)); // 合并后维度数减少 (end-start)
+
+    for (int64_t i = 0; i < start; ++i) new_shape.push_back(dims_[i]);
+    new_shape.push_back(merged);
+    for (int64_t i = end + 1; i < ndim; ++i) new_shape.push_back(dims_[i]);
+
+    // 非连续张量（例如 Transpose 后）必须先拷贝成连续内存，再 reshape
+    return Contiguous()->View(new_shape);
+
+
+    //return std::make_shared<Tensor>();
 }
 
 std::shared_ptr<Tensor> Tensor::Squeeze(int64_t dim) {
@@ -358,6 +392,62 @@ void Tensor::Backward(std::shared_ptr<Tensor> gradient, bool retain_graph, bool 
     // TODO：实现自动微分反向传播
     // 功能描述：1. 计算当前张量对叶子节点的梯度    2. 支持多输出场景的梯度累加
     // =================================== 作业 ===================================
+
+     (void)create_graph; // 当前测例不涉及高阶导，先保留接口
+
+   // 不需要梯度则直接返回
+    if (!requires_grad_) {
+        return;
+    }
+
+    // 1) 准备初始梯度：
+    //    - 若用户未提供 gradient，默认用全 1（常见深度学习框架的默认行为）
+    //    - 若用户提供 gradient，检查 shape/device/dtype 是否匹配
+    if (!gradient) {
+        gradient = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
+        gradient->Fill<float>(1.0f);
+    } else {
+        // 方案A：不要直接 CHECK_EQ(vector, vector)，避免 glog 尝试打印 vector 触发编译错误
+        CHECK_EQ(static_cast<int64_t>(gradient->Dims().size()), static_cast<int64_t>(dims_.size()))
+            << "Backward: gradient ndim mismatch.";
+        for (size_t i = 0; i < dims_.size(); ++i) {
+            CHECK_EQ(gradient->Dims()[i], dims_[i]) << "Backward: gradient shape mismatch at dim " << i;
+        }
+        CHECK_EQ(static_cast<int>(gradient->GetDevice().Type()), static_cast<int>(GetDevice().Type()))
+            << "Backward: gradient device mismatch.";
+        CHECK_EQ(static_cast<int>(gradient->Dtype()), static_cast<int>(dtype_))
+            << "Backward: gradient dtype mismatch.";
+    }
+
+    // 2) 叶子节点：将梯度累加到 grad_ 上
+    //    关键点：多次 Backward / 多输出场景必须“累加”而非覆盖
+    if (is_leaf_) {
+        if (!grad_) {
+            const_cast<Tensor *>(this)->grad_ = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
+            grad_->Fill<float>(0.0f);
+        }
+
+        // 用数值 kernel 做 grad_ += gradient，避免把 grad_ 本身挂到计算图上
+        auto add_kernel = Dispatcher::Instance().GetKernel({GetDevice().Type(), "AddForward"});
+        const_cast<Tensor *>(this)->grad_ = add_kernel.Call<std::shared_ptr<Tensor>>(grad_, gradient);
+        return;
+    }
+
+    // 3) 非叶子节点：交给 Function 的调度机制进行反向传播
+    //    Function::BackwardPartial 会负责：
+    //    - 按 output_idx_ 收集 grad_output
+    //    - 在依赖满足时调用算子 Backward
+    //    - 将梯度继续传递到前序节点
+    CHECK(grad_fn_) << "Backward: non-leaf tensor must have grad_fn.";
+
+    int idx = output_idx_;
+    if (idx < 0) idx = 0; // 常见单输出算子 idx 未设置时按 0 处理
+    grad_fn_->BackwardPartial(gradient, idx);
+
+    // 4) 是否保留计算图：不保留则释放当前节点的 grad_fn 以节省内存
+    if (!retain_graph) {
+        const_cast<Tensor *>(this)->grad_fn_ = nullptr;
+    }
 }
 
 void Tensor::ZeroGrad() {
