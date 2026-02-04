@@ -160,6 +160,7 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
 
         // dA = dC * B^T
         if (input_batch == 1 && batch_size > 1) {
+            // broadcast
             Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
                 dA(gi_data, m, k);
             dA += dC * B.transpose();
@@ -171,6 +172,7 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
 
         // dB = A^T * dC
         if (other_batch == 1 && batch_size > 1) {
+            // broadcast
             Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
                 dB(go2_data, k, n);
             dB += A.transpose() * dC;

@@ -18,11 +18,13 @@ void AdamAccumulateGrad(const std::shared_ptr<Tensor> &grad, const std::shared_p
     // TODO：实现Adam优化器的梯度累积和参数更新
     // REF:
     // =================================== 作业 ===================================
-    //   m = beta1*m + (1-beta1)*g
-    //   v = beta2*v + (1-beta2)*g^2
-    //   m_hat = m / (1 - beta1^t)
-    //   v_hat = v / (1 - beta2^t)
-    //   param -= lr * m_hat / (sqrt(v_hat) + eps)
+    // 对于每个参数 θ 和其梯度 g，在第 t 步：
+    //
+    //   m_t = β₁ · m_{t-1} + (1 - β₁) · g_t          // 更新一阶矩估计
+    //   v_t = β₂ · v_{t-1} + (1 - β₂) · g_t²         // 更新二阶矩估计
+    //   m̂_t = m_t / (1 - β₁^t)                       // 偏差修正（一阶矩）
+    //   v̂_t = v_t / (1 - β₂^t)                       // 偏差修正（二阶矩）
+    //   θ_t = θ_{t-1} - lr · m̂_t / (√v̂_t + ε)       // 参数更新
 
     const int64_t n = grad->NumElements();
 

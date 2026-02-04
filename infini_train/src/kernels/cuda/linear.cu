@@ -81,11 +81,12 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
     CUBLAS_CHECK(cublasCreate(&handle));
 
     if (batch_size == 1) {
+        // 2D 矩阵乘法
         // Row-major trick: compute C^T = B^T * A^T in column-major view
         CUBLAS_CHECK(cublasSgemm(
             handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
-            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k),
+            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k), // C 的列数,行数,共享维度
             &alpha,
             static_cast<const float *>(other->DataPtr()), static_cast<int>(n),
             static_cast<const float *>(input->DataPtr()), static_cast<int>(k),
@@ -93,6 +94,7 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
             static_cast<float *>(output->DataPtr()), static_cast<int>(n)
         ));
     } else {
+        // Batched 矩阵乘法
         const int64_t input_stride = (input_batch == 1) ? 0 : (m * k);
         const int64_t other_stride = (other_batch == 1) ? 0 : (k * n);
         const int64_t output_stride = m * n;
@@ -100,7 +102,7 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
         CUBLAS_CHECK(cublasSgemmStridedBatched(
             handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
-            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k),
+            static_cast<int>(n), static_cast<int>(m), static_cast<int>(k), // C 的列数,行数,共享维度
             &alpha,
             static_cast<const float *>(other->DataPtr()), static_cast<int>(n), other_stride,
             static_cast<const float *>(input->DataPtr()), static_cast<int>(k), input_stride,
