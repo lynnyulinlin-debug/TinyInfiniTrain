@@ -1,28 +1,39 @@
-name: Build and test cpu
+name: Build and test
 on:
   push:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
   pull_request:
-    paths-ignore:      # 改成 paths-ignore
+    paths-ignore:
       - '**.md'
       - 'LICENSE'
 
 jobs:
-  build:
-    name: Build
+  build-cpu:
+    name: Build CPU
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
       with:
         submodules: recursive
-
     - name: Build
       run: make USE_CUDA=OFF
-
     - name: Download starter pack
       run: ./download_starter_pack.sh
-
     - name: Test cpu
       run: make test-cpp
+
+  build-gpu:
+    name: Build GPU
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    - name: Setup CUDA
+      uses: Jimver/cuda-toolkit@v0.2.11
+      with:
+        cuda: '12.2.0'
+    - name: Build with CUDA
+      run: make USE_CUDA=ON
